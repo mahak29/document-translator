@@ -3,7 +3,10 @@ import { extractText } from "@/lib/extractText";
 import { translateSegments } from "@/lib/translateText";
 
 export const runtime = "nodejs";
-export const maxDuration = 60; // seconds - raise on Vercel Pro for large/scanned PDFs
+export const maxDuration = 60;
+
+const ALLOWED_EXTENSIONS = ["pdf", "txt", "text"];
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
 
 // Streams newline-delimited JSON progress events, then a final "done" event.
 // The "done" event now includes translated segments per language (for layout-
@@ -18,6 +21,27 @@ export async function POST(req: NextRequest) {
   }
   if (!languagesRaw) {
     return NextResponse.json({ error: "No target languages selected" }, { status: 400 });
+  }
+
+  // File type validation
+  const ext = file.name.split(".").pop()?.toLowerCase() || "";
+  if (!ALLOWED_EXTENSIONS.includes(ext)) {
+    return NextResponse.json(
+      { error: `File type ".${ext}" is not supported. Only PDF and TXT files are allowed.` },
+      { status: 400 }
+    );
+  }
+
+  // File size validation
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return NextResponse.json(
+      { error: `File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum allowed size is 20 MB.` },
+      { status: 400 }
+    );
+  }
+
+  if (file.size === 0) {
+    return NextResponse.json({ error: "The uploaded file is empty." }, { status: 400 });
   }
 
   const languages: string[] = JSON.parse(languagesRaw);

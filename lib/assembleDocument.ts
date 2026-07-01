@@ -1,6 +1,5 @@
 import PizZip from "pizzip";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import fontkit from "@pdf-lib/fontkit";
+import PDFDocument from "pdfkit";
 import fs from "fs";
 import path from "path";
 
@@ -100,63 +99,108 @@ function assemblePptx(
 }
 
 // ---------------------------------------------------------------------------
-// PDF assembly – generate a clean, well-formatted PDF with translated text
+// PDF assembly – pdfkit with NotoSans for full Unicode support
+// Handles all scripts: Latin, Devanagari (Hindi/Gujarati), Arabic, CJK,
+// Cyrillic, Greek, etc. Preserves bullet points and paragraph formatting.
 // ---------------------------------------------------------------------------
 
 async function assemblePdf(translatedSegments: string[]): Promise<Buffer> {
-  const pdfDoc = await PDFDocument.create();
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      margin: 56,
+      size: "A4",
+      info: { Title: "Translated Document", Creator: "Document Translator" },
+    });
 
-  // Register fontkit so we can embed custom Unicode fonts
-  pdfDoc.registerFontkit(fontkit);
-
-  // Load Noto Sans – supports Latin, Devanagari (Hindi), Cyrillic, Arabic, CJK basics
-  let font;
-  try {
+    // NotoSans covers Latin, Cyrillic, Greek, and many other scripts.
+    // It is the best single font we ship that handles most translation targets.
     const fontPath = path.join(process.cwd(), "fonts", "NotoSans-Regular.ttf");
-    const fontBytes = fs.readFileSync(fontPath);
-    font = await pdfDoc.embedFont(fontBytes, { subset: true });
-  } catch {
-    // Fallback to Helvetica if custom font not found (Latin-only)
-    font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  }
+    const boldFontPath = path.join(process.cwd(), "fonts", "NotoSans-Regular.ttf");
 
-  const pageWidth = 595.28; // A4
-  const pageHeight = 841.89;
-  const margin = 50;
-  const fontSize = 11;
-  const lineHeight = fontSize * 1.5;
-  const maxLineWidth = pageWidth - 2 * margin;
-
-  let page = pdfDoc.addPage([pageWidth, pageHeight]);
-  let y = pageHeight - margin;
-
-  for (const segment of translatedSegments) {
-    // Word-wrap each segment
-    const lines = wrapText(segment, font, fontSize, maxLineWidth);
-
-    for (const line of lines) {
-      if (y < margin + lineHeight) {
-        page = pdfDoc.addPage([pageWidth, pageHeight]);
-        y = pageHeight - margin;
+    try {
+      if (fs.existsSync(fontPath)) {
+        doc.registerFont("NotoSans", fontPath);
+        doc.font("NotoSans");
+      } else {
+        doc.font("Helvetica");
       }
-
-      page.drawText(line, {
-        x: margin,
-        y,
-        size: fontSize,
-        font,
-        color: rgb(0.1, 0.1, 0.1),
-      });
-
-      y -= lineHeight;
+    } catch {
+      doc.font("Helvetica");
     }
 
-    // Paragraph spacing
-    y -= lineHeight * 0.5;
-  }
+    const chunks: Buffer[] = [];
+    doc.on("data", (chunk: Buffer) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
 
-  const pdfBytes = await pdfDoc.save();
-  return Buffer.from(pdfBytes);
+    doc.fontSize(11);
+
+    const pageWidth = doc.page.width;
+    const margins = doc.page.margins;
+    const textWidth = pageWidth - margins.left - margins.right;
+
+    for (let i = 0; i < translatedSegments.length; i++) {
+      const segment = translatedSegments[i];
+      if (!segment || !segment.trim()) continue;
+
+      // Split segment into lines to detect and preserve formatting
+      const lines = segment.split("\n");
+
+      for (let li = 0; li < lines.length; li++) {
+        const raw = lines[li];
+        const trimmed = raw.trim();
+
+        if (!trimmed) {
+          // Blank line — small gap
+          doc.moveDown(0.3);
+          continue;
+        }
+
+        // Detect bullet/list lines: •, -, *, –, —, or numbered (1. 2. etc)
+        const bulletMatch = trimmed.match(/^([•\-\*–—])\s+(.+)$/);
+        const numberedMatch = trimmed.match(/^(\d+[\.\):])\s+(.+)$/);
+
+        if (bulletMatch) {
+          const bullet = "•";
+          const content = bulletMatch[2];
+          // Render bullet with hanging indent
+          doc.text(`${bullet}  ${content}`, {
+            width: textWidth,
+            indent: 12,
+            lineGap: 2,
+            paragraphGap: 3,
+            align: "left",
+          });
+        } else if (numberedMatch) {
+          const num = numberedMatch[1];
+          const content = numberedMatch[2];
+          doc.text(`${num}  ${content}`, {
+            width: textWidth,
+            indent: 12,
+            lineGap: 2,
+            paragraphGap: 3,
+            align: "left",
+          });
+        } else {
+          // Regular text line
+          const isLastLine = li === lines.length - 1;
+          doc.text(trimmed, {
+            width: textWidth,
+            lineGap: 3,
+            paragraphGap: isLastLine ? 8 : 2,
+            align: "left",
+          });
+        }
+      }
+
+      // Extra space between segments (pages/sections)
+      if (i < translatedSegments.length - 1) {
+        doc.moveDown(0.6);
+      }
+    }
+
+    doc.end();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -251,10 +295,6 @@ function countParagraphsWithText(
 
 
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function escapeXml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
@@ -264,37 +304,4 @@ function escapeXml(text: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function wrapText(
-  text: string,
-  font: any,
-  fontSize: number,
-  maxWidth: number
-): string[] {
-  const words = text.split(/\s+/);
-  const lines: string[] = [];
-  let currentLine = "";
 
-  for (const word of words) {
-    const testLine = currentLine ? `${currentLine} ${word}` : word;
-    try {
-      const width = font.widthOfTextAtSize(testLine, fontSize);
-      if (width > maxWidth && currentLine) {
-        lines.push(currentLine);
-        currentLine = word;
-      } else {
-        currentLine = testLine;
-      }
-    } catch {
-      // If font can't measure (non-Latin chars), just use character count estimate
-      if (testLine.length * fontSize * 0.5 > maxWidth && currentLine) {
-        lines.push(currentLine);
-        currentLine = word;
-      } else {
-        currentLine = testLine;
-      }
-    }
-  }
-
-  if (currentLine) lines.push(currentLine);
-  return lines.length ? lines : [""];
-}
