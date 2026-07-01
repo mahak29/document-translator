@@ -1,7 +1,10 @@
 import pdfParse from "pdf-parse";
-import { pdf } from "pdf-to-img";
 import { createWorker } from "tesseract.js";
 import PizZip from "pizzip";
+
+// pdf-to-img is loaded dynamically to prevent Next.js bundler from inlining it.
+// It calls require.resolve('pdfjs-dist/package.json') at module load time, which
+// fails inside a webpack bundle. Dynamic import defers that until runtime.
 
 // If the embedded text layer averages fewer characters per page than this,
 // treat the PDF as scanned/image-based and fall back to OCR.
@@ -93,6 +96,9 @@ async function extractPdf(
   const total = Math.min(numPages, MAX_PAGES);
   onProgress?.({ ocrStage: "ocr", current: 0, total });
 
+  // Dynamic import keeps pdf-to-img out of the webpack bundle entirely.
+  // pdfjs-dist is its peer dep and must be resolved at runtime, not bundle time.
+  const { pdf } = await import("pdf-to-img");
   const document = await pdf(buffer, { scale: 2 });
   const worker = await createWorker("eng");
 
