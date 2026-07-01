@@ -1,5 +1,6 @@
 import pdfParse from "pdf-parse";
 import path from "path";
+import fs from "fs";
 
 const MIN_CHARS_PER_PAGE = 20;
 const MAX_PAGES = 40;
@@ -165,15 +166,42 @@ async function extractPdf(
   const createWorker: any =
     tesseractMod.createWorker ?? tesseractMod.default?.createWorker;
 
+  let tessWorkerPath = "";
+  let tessCorePath = "";
+
+  try {
+    tessWorkerPath = eval('require').resolve("tesseract.js/src/worker-script/node/index.js");
+  } catch (e) {
+    tessWorkerPath = path.join(
+      process.cwd(),
+      "node_modules",
+      "tesseract.js",
+      "src",
+      "worker-script",
+      "node",
+      "index.js"
+    );
+  }
+
+  try {
+    const corePkgPath = eval('require').resolve("tesseract.js-core/package.json");
+    tessCorePath = path.dirname(corePkgPath);
+  } catch (e) {
+    tessCorePath = fs.existsSync(
+      path.join(process.cwd(), "node_modules", "tesseract.js-core", "tesseract-core-simd.wasm")
+    )
+      ? path.join(process.cwd(), "node_modules", "tesseract.js-core")
+      : path.join(process.cwd(), "public", "tesseract");
+  }
+
+  console.log("[Tesseract Init] process.cwd():", process.cwd());
+  console.log("[Tesseract Init] workerPath:", tessWorkerPath, "Exists:", fs.existsSync(tessWorkerPath));
+  console.log("[Tesseract Init] corePath:", tessCorePath, "Exists:", fs.existsSync(tessCorePath));
+
   const worker = await createWorker("eng", 1, {
-    workerPath:
-      "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js",
-
-    corePath:
-      "https://cdn.jsdelivr.net/npm/tesseract.js-core@5/tesseract-core-simd.wasm.js",
-
-    langPath:
-      "https://tessdata.projectnaptha.com/4.0.0",
+    workerPath: tessWorkerPath,
+    corePath: tessCorePath,
+    langPath: "https://tessdata.projectnaptha.com/4.0.0",
   });
 
   const pageTexts: string[] = [];
