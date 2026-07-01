@@ -1,5 +1,6 @@
 import pdfParse from "pdf-parse";
 import path from "path";
+import fs from "fs";
 
 const MIN_CHARS_PER_PAGE = 20;
 const MAX_PAGES = 40;
@@ -179,10 +180,19 @@ async function extractPdf(
     "node_modules",
     "tesseract.js-core"
   );
+  // corePath tells tesseract where the .wasm + .js core files are.
+  // We point to node_modules directly — Vercel includes it via
+  // outputFileTracingIncludes. public/tesseract/ is the fallback.
+  const tessCorePath = fs.existsSync(
+    path.join(process.cwd(), "node_modules", "tesseract.js-core", "tesseract-core-simd.wasm")
+  )
+    ? path.join(process.cwd(), "node_modules", "tesseract.js-core")
+    : path.join(process.cwd(), "public", "tesseract");
 
   const ocrWorker = await createWorker("eng", 1, {
     workerPath: tessWorkerPath,
     langPath:   tessLangPath,
+    corePath:   tessCorePath,
     logger:     () => {},
   });
 
