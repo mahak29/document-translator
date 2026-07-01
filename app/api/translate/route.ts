@@ -63,12 +63,26 @@ export async function POST(req: NextRequest) {
       try {
         send({ type: "stage", stage: "extracting" });
 
-        const extraction = await extractText(buffer, file.name, (p) => {
-          send({ type: "progress", stage: "extracting", ...p });
-        });
+        let extraction;
+        try {
+          extraction = await extractText(buffer, file.name, (p) => {
+            send({ type: "progress", stage: "extracting", ...p });
+          });
+        } catch (extractErr: any) {
+          const msg = extractErr?.message || "Failed to read the document";
+          // Provide friendly messages for known failure modes
+          const friendly = msg.includes("WASM") || msg.includes("wasm") || msg.includes("Aborted")
+            ? "OCR engine failed to load. Please try a PDF with selectable text instead of a scanned image."
+            : msg.includes("scanned") || msg.includes("No text")
+            ? msg
+            : `Could not read the document: ${msg}`;
+          send({ type: "error", error: friendly });
+          controller.close();
+          return;
+        }
 
         if (!extraction.fullText.trim()) {
-          send({ type: "error", error: "Could not extract any text from this document" });
+          send({ type: "error", error: "Could not extract any text from this document. If this is a scanned PDF, make sure it contains legible text." });
           controller.close();
           return;
         }
@@ -87,21 +101,31 @@ export async function POST(req: NextRequest) {
             totalLangs: languages.length,
           });
 
-          const segments = await translateSegments(
-            extraction.segments,
-            lang,
-            (current, total) => {
-              send({
-                type: "progress",
-                stage: "translating",
-                language: lang,
-                langIndex: i + 1,
-                totalLangs: languages.length,
-                current,
-                total,
-              });
-            }
-          );
+          let segments;
+          try {
+            segments = await translateSegments(
+              extraction.segments,
+              lang,
+              (current, total) => {
+                send({
+                  type: "progress",
+                  stage: "translating",
+                  language: lang,
+                  langIndex: i + 1,
+                  totalLangs: languages.length,
+                  current,
+                  total,
+                });
+              }
+            );
+          } catch (translateErr: any) {
+            send({
+              type: "error",
+              error: `Translation to ${lang} failed: ${translateErr?.message || "Unknown error"}. Check your internet connection and try again.`,
+            });
+            controller.close();
+            return;
+          }
 
           translatedSegmentsMap[lang] = segments;
           translations[lang] = segments.join("\n\n");

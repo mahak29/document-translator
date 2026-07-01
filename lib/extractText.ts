@@ -175,19 +175,22 @@ async function extractPdf(
     "node",
     "index.js"
   );
-  const tessLangPath = path.join(
-    process.cwd(),
-    "node_modules",
-    "tesseract.js-core"
-  );
-  // corePath tells tesseract where the .wasm + .js core files are.
-  // We point to node_modules directly — Vercel includes it via
-  // outputFileTracingIncludes. public/tesseract/ is the fallback.
-  const tessCorePath = fs.existsSync(
-    path.join(process.cwd(), "node_modules", "tesseract.js-core", "tesseract-core-simd.wasm")
-  )
-    ? path.join(process.cwd(), "node_modules", "tesseract.js-core")
-    : path.join(process.cwd(), "public", "tesseract");
+
+  // corePath MUST point to a directory that contains both the .js and .wasm
+  // core files. public/tesseract/ is always deployed by Vercel (static assets
+  // are never traced — they're always included). node_modules/tesseract.js-core
+  // is used locally where public/ may not be set up yet.
+  const publicTessDir  = path.join(process.cwd(), "public", "tesseract");
+  const nodeModuleTessDir = path.join(process.cwd(), "node_modules", "tesseract.js-core");
+  const tessCorePath = fs.existsSync(path.join(publicTessDir, "tesseract-core-simd.wasm"))
+    ? publicTessDir
+    : nodeModuleTessDir;
+
+  // langPath — tesseract downloads .traineddata to this directory.
+  // Use a writable temp location on Vercel (/tmp), local dev uses node_modules.
+  const tessLangPath = process.env.VERCEL
+    ? "/tmp"
+    : path.join(process.cwd(), "node_modules", "tesseract.js-core");
 
   const ocrWorker = await createWorker("eng", 1, {
     workerPath: tessWorkerPath,
