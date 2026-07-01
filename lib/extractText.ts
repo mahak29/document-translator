@@ -1,6 +1,5 @@
 import pdfParse from "pdf-parse";
 import path from "path";
-import fs from "fs";
 
 const MIN_CHARS_PER_PAGE = 20;
 const MAX_PAGES = 40;
@@ -166,37 +165,15 @@ async function extractPdf(
   const createWorker: any =
     tesseractMod.createWorker ?? tesseractMod.default?.createWorker;
 
-  const tessWorkerPath = path.join(
-    process.cwd(),
-    "node_modules",
-    "tesseract.js",
-    "src",
-    "worker-script",
-    "node",
-    "index.js"
-  );
+  const worker = await createWorker("eng", 1, {
+    workerPath:
+      "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js",
 
-  // corePath MUST point to a directory that contains both the .js and .wasm
-  // core files. public/tesseract/ is always deployed by Vercel (static assets
-  // are never traced — they're always included). node_modules/tesseract.js-core
-  // is used locally where public/ may not be set up yet.
-  const publicTessDir  = path.join(process.cwd(), "public", "tesseract");
-  const nodeModuleTessDir = path.join(process.cwd(), "node_modules", "tesseract.js-core");
-  const tessCorePath = fs.existsSync(path.join(publicTessDir, "tesseract-core-simd.wasm"))
-    ? publicTessDir
-    : nodeModuleTessDir;
+    corePath:
+      "https://cdn.jsdelivr.net/npm/tesseract.js-core@5/tesseract-core-simd.wasm.js",
 
-  // langPath — tesseract downloads .traineddata to this directory.
-  // Use a writable temp location on Vercel (/tmp), local dev uses node_modules.
-  const tessLangPath = process.env.VERCEL
-    ? "/tmp"
-    : path.join(process.cwd(), "node_modules", "tesseract.js-core");
-
-  const ocrWorker = await createWorker("eng", 1, {
-    workerPath: tessWorkerPath,
-    langPath:   tessLangPath,
-    corePath:   tessCorePath,
-    logger:     () => {},
+    langPath:
+      "https://tessdata.projectnaptha.com/4.0.0",
   });
 
   const pageTexts: string[] = [];
@@ -204,12 +181,12 @@ async function extractPdf(
   try {
     for (let i = 1; i <= total; i++) {
       const png = await renderPageToPng(buffer, i, 2);
-      const { data: { text } } = await ocrWorker.recognize(png);
+      const { data: { text } } = await worker.recognize(png);
       pageTexts.push(text.trim());
       onProgress?.({ ocrStage: "ocr", current: i, total });
     }
   } finally {
-    await ocrWorker.terminate();
+    await worker.terminate();
   }
 
   const fullText = pageTexts.join("\n\n---\n\n");
