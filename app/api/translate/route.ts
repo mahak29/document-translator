@@ -3,7 +3,7 @@ import { extractText } from "@/lib/extractText";
 import { translateSegments } from "@/lib/translateText";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const ALLOWED_EXTENSIONS = ["pdf", "txt", "text"];
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
