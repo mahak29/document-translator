@@ -4,10 +4,10 @@ const nextConfig = {
   // break when webpack tries to bundle them for the server.
   // Marking them external makes Next.js load them via plain Node require.
   serverExternalPackages: [
-    "pdf-to-img",
     "pdfjs-dist",
     "tesseract.js",
     "pdf-parse",
+    "canvas",
     "pizzip",
     "pdf-lib",
     "@pdf-lib/fontkit",
@@ -15,10 +15,10 @@ const nextConfig = {
   ],
   experimental: {
     serverComponentsExternalPackages: [
-      "pdf-to-img",
       "pdfjs-dist",
       "tesseract.js",
       "pdf-parse",
+      "canvas",
       "pizzip",
       "pdf-lib",
       "@pdf-lib/fontkit",

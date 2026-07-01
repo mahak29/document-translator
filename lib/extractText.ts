@@ -1,10 +1,7 @@
 import pdfParse from "pdf-parse";
 import { createWorker } from "tesseract.js";
 import PizZip from "pizzip";
-
-// pdf-to-img is loaded dynamically to prevent Next.js bundler from inlining it.
-// It calls require.resolve('pdfjs-dist/package.json') at module load time, which
-// fails inside a webpack bundle. Dynamic import defers that until runtime.
+import path from "path";
 
 // If the embedded text layer averages fewer characters per page than this,
 // treat the PDF as scanned/image-based and fall back to OCR.
@@ -21,10 +18,6 @@ export type ExtractProgress = {
 
 export type OnExtractProgress = (progress: ExtractProgress) => void;
 
-/**
- * Result of extraction – segments preserve the document's paragraph structure
- * so we can map translations back to exact positions during re-assembly.
- */
 export type ExtractionResult = {
   fullText: string;
   segments: string[];
@@ -70,7 +63,34 @@ export async function extractText(
 }
 
 // ---------------------------------------------------------------------------
-// PDF extraction (unchanged logic, wrapped in ExtractionResult)
+// Render a single PDF page to a PNG buffer using pdfjs-dist + canvas.
+// Both packages are already installed; this replaces pdf-to-img which had
+// a broken require.resolve('pdfjs-dist/package.json') at module load time.
+// ---------------------------------------------------------------------------
+
+async function renderPdfPageToImage(
+  pdfDoc: any,
+  pageNum: number,
+  scale = 2
+): Promise<Buffer> {
+  const { createCanvas } = await import("canvas");
+  const page = await pdfDoc.getPage(pageNum);
+  const viewport = page.getViewport({ scale });
+
+  const canvas = createCanvas(
+    Math.ceil(viewport.width),
+    Math.ceil(viewport.height)
+  );
+  const ctx = canvas.getContext("2d") as any;
+
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  page.cleanup();
+
+  return canvas.toBuffer("image/png");
+}
+
+// ---------------------------------------------------------------------------
+// PDF extraction
 // ---------------------------------------------------------------------------
 
 async function extractPdf(
@@ -81,10 +101,10 @@ async function extractPdf(
   const numPages = parsed.numpages || 1;
   const avgCharsPerPage = parsed.text.trim().length / numPages;
 
+  // If the PDF has a usable text layer, use it directly — no OCR needed.
   if (avgCharsPerPage >= MIN_CHARS_PER_PAGE) {
     onProgress?.({ ocrStage: "parsing", current: numPages, total: numPages });
     const text = parsed.text.trim();
-    // Split into paragraph segments by double-newlines
     const segments = text
       .split(/\n\s*\n/)
       .map((s) => s.trim())
@@ -92,49 +112,63 @@ async function extractPdf(
     return { fullText: text, segments, fileType: "pdf" };
   }
 
-  // Fallback: OCR page by page
+  // Scanned/image PDF — fall back to OCR using pdfjs-dist + canvas + tesseract.
+  // pdfjs-dist is already a declared dependency (needed by pdf-to-img as a peer).
   const total = Math.min(numPages, MAX_PAGES);
   onProgress?.({ ocrStage: "ocr", current: 0, total });
 
-  // Dynamic import keeps pdf-to-img out of the webpack bundle entirely.
-  // pdfjs-dist is its peer dep and must be resolved at runtime, not bundle time.
-  const { pdf } = await import("pdf-to-img");
-  const document = await pdf(buffer, { scale: 2 });
-  const worker = await createWorker("eng");
+  // Dynamically import pdfjs-dist so the bundler never inlines it.
+  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs" as any);
 
+  // Point the worker at the file on disk. `process.cwd()` is the project root
+  // on Vercel (/var/task), where node_modules is present at runtime.
+  const workerPath = path.join(
+    process.cwd(),
+    "node_modules",
+    "pdfjs-dist",
+    "legacy",
+    "build",
+    "pdf.worker.mjs"
+  );
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `file://${workerPath}`;
+
+  const pdfDoc = await pdfjsLib.getDocument({
+    data: new Uint8Array(buffer),
+    disableFontFace: true,
+    verbosity: 0,
+  }).promise;
+
+  const worker = await createWorker("eng");
   const pageTexts: string[] = [];
-  let pageIndex = 0;
 
   try {
-    for await (const imageBuffer of document) {
-      pageIndex++;
-      if (pageIndex > MAX_PAGES) break;
+    for (let i = 1; i <= Math.min(pdfDoc.numPages, MAX_PAGES); i++) {
+      const imgBuffer = await renderPdfPageToImage(pdfDoc, i, 2);
 
       const {
         data: { text },
-      } = await worker.recognize(imageBuffer);
+      } = await worker.recognize(imgBuffer);
       pageTexts.push(text.trim());
 
-      onProgress?.({ ocrStage: "ocr", current: pageIndex, total });
+      onProgress?.({ ocrStage: "ocr", current: i, total });
     }
   } finally {
     await worker.terminate();
+    await pdfDoc.destroy();
   }
 
   const fullText = pageTexts.join("\n\n---\n\n");
-  // Each page is a segment for PDF
   const segments = pageTexts.filter(Boolean);
   return { fullText, segments, fileType: "pdf" };
 }
 
 // ---------------------------------------------------------------------------
-// DOCX extraction – walk <w:t> nodes, collect text per paragraph
+// DOCX extraction
 // ---------------------------------------------------------------------------
 
 function extractDocx(buffer: Buffer): ExtractionResult {
   const zip = new PizZip(buffer);
 
-  // Collect XML files to process (document + headers + footers)
   const xmlFiles = ["word/document.xml"];
   for (const entry of Object.keys(zip.files)) {
     if (/^word\/(header|footer)\d+\.xml$/.test(entry)) {
@@ -143,27 +177,22 @@ function extractDocx(buffer: Buffer): ExtractionResult {
   }
 
   const segments: string[] = [];
-
   for (const xmlFile of xmlFiles) {
     const file = zip.file(xmlFile);
     if (!file) continue;
-    const xml = file.asText();
-    const paraSegments = extractParagraphTexts(xml, "w:t");
-    segments.push(...paraSegments);
+    segments.push(...extractParagraphTexts(file.asText(), "w:t"));
   }
 
-  const fullText = segments.join("\n\n");
-  return { fullText, segments, fileType: "docx" };
+  return { fullText: segments.join("\n\n"), segments, fileType: "docx" };
 }
 
 // ---------------------------------------------------------------------------
-// PPTX extraction – walk <a:t> nodes per slide, collect text per paragraph
+// PPTX extraction
 // ---------------------------------------------------------------------------
 
 function extractPptx(buffer: Buffer): ExtractionResult {
   const zip = new PizZip(buffer);
 
-  // Find all slide XML files and sort them
   const slideFiles = Object.keys(zip.files)
     .filter((f) => /^ppt\/slides\/slide\d+\.xml$/.test(f))
     .sort((a, b) => {
@@ -173,17 +202,13 @@ function extractPptx(buffer: Buffer): ExtractionResult {
     });
 
   const segments: string[] = [];
-
   for (const slideFile of slideFiles) {
     const file = zip.file(slideFile);
     if (!file) continue;
-    const xml = file.asText();
-    const paraSegments = extractParagraphTexts(xml, "a:t");
-    segments.push(...paraSegments);
+    segments.push(...extractParagraphTexts(file.asText(), "a:t"));
   }
 
-  const fullText = segments.join("\n\n");
-  return { fullText, segments, fileType: "pptx" };
+  return { fullText: segments.join("\n\n"), segments, fileType: "pptx" };
 }
 
 // ---------------------------------------------------------------------------
@@ -200,36 +225,26 @@ function extractTxt(buffer: Buffer): ExtractionResult {
 }
 
 // ---------------------------------------------------------------------------
-// Shared XML helper – extracts paragraph-level text from XML
-// tagName is "w:t" for DOCX or "a:t" for PPTX
+// Shared XML helper
 // ---------------------------------------------------------------------------
 
 function extractParagraphTexts(xml: string, tagName: string): string[] {
-  // Determine paragraph tag name
   const pTag = tagName === "w:t" ? "w:p" : "a:p";
-
   const segments: string[] = [];
-  // Match paragraphs – use a regex that handles nested content
   const paraRegex = new RegExp(`<${pTag}[\\s>][\\s\\S]*?<\\/${pTag}>`, "g");
   let paraMatch;
 
   while ((paraMatch = paraRegex.exec(xml)) !== null) {
-    const paraXml = paraMatch[0];
-    // Find all text nodes within this paragraph
     const textRegex = new RegExp(
       `<${tagName}(?:\\s[^>]*)?>([^<]*)<\\/${tagName}>`,
       "g"
     );
     let textMatch;
     let paraText = "";
-
-    while ((textMatch = textRegex.exec(paraXml)) !== null) {
+    while ((textMatch = textRegex.exec(paraMatch[0])) !== null) {
       paraText += textMatch[1];
     }
-
-    if (paraText.trim()) {
-      segments.push(paraText);
-    }
+    if (paraText.trim()) segments.push(paraText);
   }
 
   return segments;
