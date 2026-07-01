@@ -48,25 +48,20 @@ export async function extractText(
 }
 
 // ---------------------------------------------------------------------------
-// CanvasFactory backed by @napi-rs/canvas.
-// Loaded via eval('require') so webpack's static analysis never sees the
-// import and cannot attempt to bundle or trace the native .node binary.
+// CanvasFactory backed by @napi-rs/canvas
 // ---------------------------------------------------------------------------
 
-function nativeRequire(id: string): any {
-  // eval prevents webpack from statically analyzing the require call.
-  // At runtime this is a plain Node.js require() - no bundling involved.
-  // eslint-disable-next-line no-eval
-  return eval("require")(id);
-}
-
 function makeCanvasFactory() {
-  const napiCanvas = nativeRequire("@napi-rs/canvas");
+  // Listed in serverExternalPackages + outputFileTracingIncludes so:
+  // 1. webpack emits `require("@napi-rs/canvas")` verbatim (no bundling)
+  // 2. Vercel file tracer copies the module into the deployment package
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const napiCanvas = require("@napi-rs/canvas");
   const createCanvas: (w: number, h: number) => any =
     napiCanvas.createCanvas ?? napiCanvas.default?.createCanvas;
 
   if (typeof createCanvas !== "function") {
-    throw new Error("@napi-rs/canvas could not be loaded — createCanvas is not a function.");
+    throw new Error("@napi-rs/canvas: createCanvas not found.");
   }
 
   return {
@@ -92,22 +87,19 @@ async function renderPageToPng(
   pageNum: number,
   scale = 2
 ): Promise<Buffer> {
-  // Load pdfjs-dist via eval-require — keeps it out of webpack bundle
-  let pdfjsLib: any;
-  try {
-    pdfjsLib = nativeRequire("pdfjs-dist/legacy/build/pdf.mjs");
-  } catch {
-    // Node 20 and below can't require() .mjs — use dynamic import instead
-    pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs" as any);
-  }
-
+  // Dynamic import keeps pdfjs out of the initial bundle parse
+  // while still being visible to the output file tracer via
+  // outputFileTracingIncludes.
+  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs" as any);
   const pdfjs = pdfjsLib.default ?? pdfjsLib;
 
-  // Point the worker at the real file on disk.
-  // On Vercel node_modules lives at /var/task/node_modules.
   const workerPath = path.join(
     process.cwd(),
-    "node_modules", "pdfjs-dist", "legacy", "build", "pdf.worker.mjs"
+    "node_modules",
+    "pdfjs-dist",
+    "legacy",
+    "build",
+    "pdf.worker.mjs"
   );
   pdfjs.GlobalWorkerOptions.workerSrc = `file://${workerPath.replace(/\\/g, "/")}`;
 
@@ -129,7 +121,6 @@ async function renderPageToPng(
     const cc  = canvasFactory.create(width, height);
     const ctx = cc.context as any;
 
-    // White background → clean OCR contrast
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, width, height);
 
@@ -144,8 +135,8 @@ async function renderPageToPng(
 
 // ---------------------------------------------------------------------------
 // PDF extraction
-// Pass 1 — pdf-parse  (text-layer PDFs, ~95 % of real-world files)
-// Pass 2 — pdfjs-dist + @napi-rs/canvas + tesseract.js  (scanned PDFs)
+// Pass 1 — pdf-parse        (text-layer PDFs)
+// Pass 2 — pdfjs + tesseract (scanned PDFs)
 // ---------------------------------------------------------------------------
 
 async function extractPdf(
@@ -156,36 +147,37 @@ async function extractPdf(
   const numPages = parsed.numpages || 1;
   const avgChars = parsed.text.trim().length / numPages;
 
-  // ── Pass 1 ────────────────────────────────────────────────────────────────
+  // Pass 1: embedded text layer
   if (avgChars >= MIN_CHARS_PER_PAGE) {
     onProgress?.({ ocrStage: "parsing", current: numPages, total: numPages });
-    const text     = parsed.text.trim();
-    const segments = text.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean);
+    const text = parsed.text.trim();
+    const segments = text.split(/\n{2,}/).map((s: string) => s.trim()).filter(Boolean);
     return { fullText: text, segments, fileType: "pdf" };
   }
 
-  // ── Pass 2: OCR ───────────────────────────────────────────────────────────
+  // Pass 2: OCR
   const total = Math.min(numPages, MAX_PAGES);
   onProgress?.({ ocrStage: "ocr", current: 0, total });
 
-  // Load tesseract.js via eval-require
-  const tesseractMod = nativeRequire("tesseract.js");
+  // tesseract.js is listed in serverExternalPackages + outputFileTracingIncludes
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const tesseractMod = require("tesseract.js");
   const createWorker: any =
     tesseractMod.createWorker ?? tesseractMod.default?.createWorker;
 
-  if (typeof createWorker !== "function") {
-    throw new Error("tesseract.js could not be loaded.");
-  }
-
-  // Tell tesseract where to find its worker script and language data.
-  // On Vercel everything lives under process.cwd() = /var/task at runtime.
   const tessWorkerPath = path.join(
     process.cwd(),
-    "node_modules", "tesseract.js", "src", "worker-script", "node", "index.js"
+    "node_modules",
+    "tesseract.js",
+    "src",
+    "worker-script",
+    "node",
+    "index.js"
   );
   const tessLangPath = path.join(
     process.cwd(),
-    "node_modules", "tesseract.js-core"
+    "node_modules",
+    "tesseract.js-core"
   );
 
   const ocrWorker = await createWorker("eng", 1, {
@@ -212,8 +204,8 @@ async function extractPdf(
 
   if (!fullText.trim()) {
     throw new Error(
-      "No text found in this PDF. The scanned image may have poor quality " +
-      "or contain unrecognisable characters."
+      "No text could be extracted from this PDF. " +
+      "The scanned image may be too low quality or contain unrecognisable text."
     );
   }
 
@@ -225,7 +217,7 @@ async function extractPdf(
 // ---------------------------------------------------------------------------
 
 function extractTxt(buffer: Buffer): ExtractionResult {
-  const text     = buffer.toString("utf-8").trim();
-  const segments = text.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean);
+  const text = buffer.toString("utf-8").trim();
+  const segments = text.split(/\n\s*\n/).map((s: string) => s.trim()).filter(Boolean);
   return { fullText: text, segments, fileType: "txt" };
 }
