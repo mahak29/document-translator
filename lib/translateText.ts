@@ -59,3 +59,59 @@ export async function translateText(
 
   return translatedChunks.join("\n\n");
 }
+
+/**
+ * Translates an array of text segments individually, preserving their order.
+ * Returns an array of translated segments (1:1 mapping with input).
+ *
+ * Segments that are too large are chunked internally. Empty segments are
+ * passed through as-is.
+ */
+export async function translateSegments(
+  segments: string[],
+  targetLangCode: string,
+  onProgress?: OnTranslateProgress
+): Promise<string[]> {
+  const translated: string[] = [];
+  const nonEmpty = segments.filter((s) => s.trim()).length;
+  let done = 0;
+
+  onProgress?.(0, nonEmpty);
+
+  for (const segment of segments) {
+    if (!segment.trim()) {
+      translated.push(segment);
+      continue;
+    }
+
+    // If segment is small enough, translate directly
+    if (segment.length <= CHUNK_SIZE) {
+      const result: any = await translate(segment, { to: targetLangCode });
+      const text = Array.isArray(result)
+        ? result.map((r) => r.text).join(" ")
+        : result.text;
+      translated.push(text);
+    } else {
+      // Chunk large segments
+      const chunks = chunkText(segment, CHUNK_SIZE);
+      const parts: string[] = [];
+      for (const chunk of chunks) {
+        const result: any = await translate(chunk, { to: targetLangCode });
+        const text = Array.isArray(result)
+          ? result.map((r) => r.text).join(" ")
+          : result.text;
+        parts.push(text);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      translated.push(parts.join(" "));
+    }
+
+    done++;
+    onProgress?.(done, nonEmpty);
+
+    // Small delay between segment requests
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  return translated;
+}

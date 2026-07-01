@@ -1,6 +1,6 @@
 export const metadata = {
-  title: "PDF Translator",
-  description: "Upload a PDF, translate it into any language",
+  title: "Document Translator",
+  description: "Upload a PDF, DOCX, PPTX, or TXT document and translate it into any language with layout preserved",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

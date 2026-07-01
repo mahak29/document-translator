@@ -10,6 +10,9 @@ const nextConfig = {
       "pdfjs-dist",
       "tesseract.js",
       "pdf-parse",
+      "pizzip",
+      "pdf-lib",
+      "@pdf-lib/fontkit",
     ],
   },
 };
